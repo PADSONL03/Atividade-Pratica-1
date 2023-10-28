@@ -1,6 +1,6 @@
 # Pacotes que serao utilizados --------------------------------------------
 
-#install.packages("doParallel")
+install.packages("doParallel")
 library(tidymodels)
 library(tidyverse)
 library(ISLR)
@@ -10,7 +10,7 @@ library(skimr)
 
 
 # Utiliza os dados da análise de dados do tri anterior
-dados <- read.csv2("C:/Users/gabri/OneDrive/Documentos/ACADÊMICO/POS GRADUAÇÃO/01 - 1T23/01 - ESTATÍSTICA DE MÁQUINA/00 - Análise de dados/sao-paulo-properties-april-2019.csv")
+dados <- read.csv("https://raw.githubusercontent.com/PADSONL03/Atividade-Pratica-1/main/sao-paulo-properties-april-2019.csv", sep = ';')
 
 dados %>% 
   skim()
