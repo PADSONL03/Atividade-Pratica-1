@@ -159,3 +159,106 @@ fitted %>% # obtem as metricas de todos os modelos ajustados
   group_by(modelo) %>% 
   metrics(truth = observado, estimate = .pred) 
 
+
+# Boosting ----------------------------------------
+
+boosting <- boost_tree(#mtry = tune(), # definicao do boosting
+                   #trees = tune(), # todos argumentos com tune() serao tunados a seguir  
+                   #min_n = tune()
+  ) %>% 
+  set_engine("xgboost") %>% # define qual função sera usada
+  set_mode("regression") # define que e'  problema de regressao
+boosting
+
+# Treina o modelo
+
+boosting_fit <- boosting %>% 
+  fit(Price ~ ., treinamento_proc) # ajuste do modelo definido acima
+boosting_fit
+
+
+# importância das variaveis
+vip(boosting_fit)
+
+# Faz predições com teste -- Testa o modelo
+fitted_bosting <- boosting_fit %>% # faz previsao para os dados de teste
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$Price, 
+         modelo = "boosting")
+
+fitted <- fitted %>% # empilha as previsoes da floresta tunada
+  bind_rows(fitted_bosting)
+
+
+fitted %>% # obtem as metricas de todos os modelos ajustados
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) 
+
+
+
+# tune - ajuste de hiperparametros ----------------------------------------
+
+boosting_tuned <- boost_tree(mtry = tune(), # definicao do boosting
+  trees = tune(), # todos argumentos com tune() serao tunados a seguir  
+  min_n = tune(),
+  tree_depth  = tune()
+) %>% 
+  set_engine("xgboost") %>% # define qual função sera usada
+  set_mode("regression") # define que e'  problema de regressao
+boosting_tuned
+
+
+
+# validação cruzada para ajuste de hiperparametros
+set.seed(123)
+cv_split <- vfold_cv(treinamento, v = 10)
+
+registerDoParallel() # pararaleliza o processo
+
+# para tunar os parametros
+boosting_grid <- tune_grid(boosting_tuned, # especificacao do modelo
+                     receita, # a receita a ser aplicada a cada lote
+                     resamples = cv_split, # os lotes da validacao cruzada
+                     grid = 10, # quantas combinacoes de parametros vamos considerar
+                     metrics = metric_set(rmse, mae)) 
+
+autoplot(boosting_grid) # plota os resultados
+
+boosting_grid %>% 
+  collect_metrics() 
+
+boosting_grid %>% 
+  select_best("rmse") # seleciona a melhor combinacao de hiperparametros
+
+best <- boosting_grid %>% 
+  select_best("rmse") # salva o melhor modelo na variavel best
+
+
+# finaliza modelo
+boosting_fit2 <- finalize_model(boosting_tuned, parameters = best) %>% # informa os valores de hiperparametros a serem considerados
+  fit(Price ~ ., treinamento_proc) # executa o modelo com os valores de hiperparametros definidos acima
+
+fitted_boosting_tuned <- boosting_fit2 %>% # faz previsao para os dados de teste
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$Price, 
+         modelo = "boosting - tune")
+
+fitted <- fitted %>% # empilha as previsoes da floresta tunada
+  bind_rows(fitted_boosting_tuned)
+
+fitted %>% # obtem as metricas de todos os modelos ajustados
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) 
+
+# grafico de dispersao entre valor observado e valor predito
+fitted %>% 
+  ggplot(aes(observado, .pred, group = modelo, color = modelo)) + #eixo x observado, eixo y predito 
+  geom_point(size = 2, alpha = .5) +  #, col = "blue"
+  labs(y = "Predito", x = "Observado") +
+  scale_y_log10(labels = scales::comma) +
+  scale_x_log10(labels = scales::comma) +
+  theme_minimal()+
+  theme_bw()+
+  facet_grid(~ modelo, scale = "free_y") 
+
+
