@@ -1,0 +1,275 @@
+---
+title: "Modelos Comparativos"
+date: "2023-10-30"
+output: html_document
+---
+  
+  Os dados selecionados tem como referencia o arquivo sao-paulo-properties-april-2019, trabalhado no trimestre passado.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE)
+library(tidymodels)
+library(tidyverse)
+library(ISLR)
+library(vip)
+library(doParallel)
+library(skimr)
+```
+
+```{r import dados, include=FALSE}
+dados <- read.csv("https://raw.githubusercontent.com/PADSONL03/Atividade-Pratica-1/main/sao-paulo-properties-april-2019.csv", sep = ';')
+```
+
+### Skim do Dataframe
+
+```{r skim, echo=FALSE}
+dados %>% 
+  skim()
+```
+
+##### Filtragem dos dados para Negotiation.Type = 'rent'
+
+```{r include=FALSE}
+dados <- dados %>% 
+  filter(Negotiation.Type == 'rent')
+```
+
+### Treino e Teste
+
+```{r}
+set.seed(123)
+split <- initial_split(dados, prop = 0.7, strata = 'Price') ## , strata = "Price"
+treinamento <- training(split)
+teste <- testing(split)
+glimpse(treinamento)
+```
+
+### Tidymodels
+
+###### Receita
+
+```{r receita}
+receita <- recipe(Price ~ ., data = treinamento) %>%
+  step_rm(Negotiation.Type) %>% # remove o Negotiation.Type pois foi filtrada apenas com 'rent'%>%
+  step_zv(all_predictors()) %>% # remove demais colunas que só tenham um único valor
+  step_mutate(
+    Elevator = as.factor(ifelse(Elevator == 1, "Sim", "Não")),
+    Furnished = as.factor(ifelse(Furnished == 1, "Sim", "Não")),
+    Swimming.Pool = as.factor(ifelse(Swimming.Pool == 1, "Sim", "Não")),
+    New = as.factor(ifelse(New == 1, "Sim", "Não"))
+  ) %>% #transforma flags em nominais para posteriormente serem transformadas em dummys
+  step_integer(c(Latitude,Longitude)) %>% # transforma latitude e longitude em infos numéricas
+  step_normalize(all_numeric(), -all_outcomes()) %>% #normaliza todas as colunas numéricas
+  step_dummy(all_nominal(), -all_outcomes()) #transforma todas as categóricas em dummys
+```
+
+###### Bake
+```{r warning=FALSE}
+(receita_prep <- prep(receita)) # prepara a receita definida acima
+treinamento_proc <- bake(receita_prep, new_data = NULL) # obtem os dados de treinamento processados
+teste_proc <- bake(receita_prep, new_data = teste) # obtem os dados de teste processados
+```
+
+###### Skim dos dados de treino e teste
+```{r}
+treinamento_proc %>% 
+  glimpse()
+treinamento_proc %>% 
+  skim()
+teste_proc %>% 
+  skim()
+```
+
+### Floresta Aleatória
+```{r}
+rf <- rand_forest() %>% # define o modelo floresta aleatoria
+  set_engine("ranger", # define o pacote que vai fazer o ajuste do modelo
+             importance = "permutation") %>%  #
+  set_mode("regression") # define que é um modelo de regressao
+```
+
+```{r}
+rf_fit <- rf %>% 
+  fit(Price ~ ., treinamento_proc) # ajuste do modelo definido acima
+rf_fit
+```
+
+##### Importancia das variaveis
+```{r echo=FALSE}
+vip(rf_fit)
+```
+
+##### Teste do modelo
+```{r}
+# Faz predições com teste -- Testa o modelo
+fitted <- rf_fit %>% 
+  predict(new_data = teste_proc) %>% # realiza predicao para os dados de teste
+  mutate(observado = teste_proc$Price, # mesma estrutura do fitted_lm
+         modelo = "random forest")
+fitted %>% 
+  head()
+```
+
+#### Avaliação de Desempenho
+```{r}
+fitted %>% 
+  group_by(modelo) %>% # agrupa pelo modelo ajustado
+  metrics(truth = observado, estimate = .pred) # obtem as metricas de avaliacao dos modelos
+```
+
+#### Tunagem de hiperparametros
+```{r}
+rf2 <- rand_forest(mtry = tune(), # definicao da floresta aleatoria 
+                   trees = tune(), # todos argumentos com tune() serao tunados a seguir  
+                   min_n = tune()) %>% 
+  set_engine("ranger") %>% # define qual função sera usada
+  set_mode("regression") # define que e'  problema de regressao
+# validação cruzada para ajuste de hiperparametros
+set.seed(123)
+cv_split <- vfold_cv(treinamento, v = 10)
+registerDoParallel() # pararaleliza o processo
+#rf_grid <- tune_grid(rf2, # especificacao do modelo
+#                     receita, # a receita a ser aplicada a cada lote
+#                     resamples = cv_split, # os lotes da validacao cruzada
+#                     grid = 10, # quantas combinacoes de parametros vamos considerar
+#                     metrics = metric_set(rmse, mae)) 
+#autoplot(rf_grid)
+
+
+```
+
+#### Seleciona o Melhor conjunto de hiperparametros
+```{r}
+#rf_grid %>% 
+#  collect_metrics() 
+#rf_grid %>% 
+#  select_best("rmse") # seleciona a melhor combinacao de hiperparametros
+#best <- rf_grid %>% 
+#  select_best("rmse") # salva o melhor modelo na variavel best
+
+best_rf<- tibble(mtry = 39,
+              trees = 1042,
+              min_n = 4,
+              .config = 'Preprocessor1_Model01')
+
+```
+
+##### Finalização do Modelo
+```{r}
+rf_fit2 <- finalize_model(rf2, parameters = best_rf) %>% # informa os valores de hiperparametros a serem considerados
+  fit(Price ~ ., treinamento_proc) # executa o modelo com os valores de hiperparametros definidos acima
+fitted_rf2 <- rf_fit2 %>% # faz previsao para os dados de teste
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$Price, 
+         modelo = "random forest - tune")
+fitted <- fitted %>% # empilha as previsoes da floresta tunada
+  bind_rows(fitted_rf2)
+fitted %>% # obtem as metricas de todos os modelos ajustados
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) 
+```
+
+### Boosting
+```{r}
+boosting <- boost_tree(#mtry = tune(), # definicao do boosting
+  #trees = tune(), # todos argumentos com tune() serao tunados a seguir  
+  #min_n = tune()
+) %>% 
+  set_engine("xgboost") %>% # define qual função sera usada
+  set_mode("regression") # define que e'  problema de regressao
+boosting
+# Treina o modelo
+boosting_fit <- boosting %>% 
+  fit(Price ~ ., treinamento_proc) # ajuste do modelo definido acima
+boosting_fit
+```
+
+#### Importancia das variaveis
+
+```{r echo=FALSE}
+# importância das variaveis
+vip(boosting_fit)
+```
+#### Teste do modelo
+```{r}
+# Faz predições com teste -- Testa o modelo
+fitted_bosting <- boosting_fit %>% # faz previsao para os dados de teste
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$Price, 
+         modelo = "boosting")
+fitted <- fitted %>% # empilha as previsoes da floresta tunada
+  bind_rows(fitted_bosting)
+fitted %>% # obtem as metricas de todos os modelos ajustados
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) 
+```
+
+#### Tunagem de hiperparametros
+```{r}
+boosting_tuned <- boost_tree(mtry = tune(), # definicao do boosting
+                             trees = tune(), # todos argumentos com tune() serao tunados a seguir  
+                             min_n = tune(),
+                             tree_depth  = tune()
+) %>% 
+  set_engine("xgboost") %>% # define qual função sera usada
+  set_mode("regression") # define que e'  problema de regressao
+boosting_tuned
+# validação cruzada para ajuste de hiperparametros
+set.seed(123)
+cv_split <- vfold_cv(treinamento, v = 10)
+registerDoParallel() # pararaleliza o processo
+# para tunar os parametros
+#boosting_grid <- tune_grid(boosting_tuned, # especificacao do modelo
+#                           receita, # a receita a ser aplicada a cada lote
+#                           resamples = cv_split, # os lotes da validacao cruzada
+#                           grid = 10, # quantas combinacoes de parametros vamos considerar
+#                           metrics = metric_set(rmse, mae)) 
+#autoplot(boosting_grid) # plota os resultados
+```
+
+#### Seleciona o melhor conjunto de hiperparametros
+```{r}
+#boosting_grid %>% 
+#  collect_metrics() 
+#boosting_grid %>% 
+#  select_best("rmse") # seleciona a melhor combinacao de hiperparametros
+#best <- boosting_grid %>% 
+#  select_best("rmse") # salva o melhor modelo na variavel best
+
+best_boosting<- tibble(mtry = 2,
+                 trees = 339,
+                 min_n = 18,
+                 tree_depth = 4,
+                 .config = 'Preprocessor1_Model01')
+```
+
+#### Finalização do Modelo
+```{r}
+boosting_fit2 <- finalize_model(boosting_tuned, parameters = best_boosting) %>% # informa os valores de hiperparametros a serem considerados
+  fit(Price ~ ., treinamento_proc) # executa o modelo com os valores de hiperparametros definidos acima
+fitted_boosting_tuned <- boosting_fit2 %>% # faz previsao para os dados de teste
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$Price, 
+         modelo = "boosting - tune")
+```
+
+### Empilhando os resultados dos dois modelos
+```{r}
+fitted <- fitted %>% # empilha as previsoes da floresta tunada
+  bind_rows(fitted_boosting_tuned)
+fitted %>% # obtem as metricas de todos os modelos ajustados
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) 
+```
+### Grafico entre Observado e Predito
+```{r echo=FALSE}
+fitted %>% 
+  ggplot(aes(observado, .pred, group = modelo, color = modelo)) + #eixo x observado, eixo y predito 
+  geom_point(size = 2, alpha = .5) +  #, col = "blue"
+  labs(y = "Predito", x = "Observado") +
+  scale_y_log10(labels = scales::comma) +
+  scale_x_log10(labels = scales::comma) +
+  theme_minimal()+
+  theme_bw()+
+  facet_grid(~ modelo, scale = "free_y")
+```
